@@ -1,0 +1,10 @@
+sentencepiece
+tensorflow==1.13.1
+tensorflow_hub
+tf_sentencepiece
+pandas
+more_itertools
+spacy
+scikit-learn
+git+https://github.com/guillaumegenthial/tf_metrics.git
+imbalanced-learn
