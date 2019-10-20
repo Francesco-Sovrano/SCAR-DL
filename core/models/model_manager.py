@@ -65,6 +65,15 @@ class ModelManager():
 			'text_input': text_input
 		}
 		return tf_placeholders, session
+
+	@staticmethod
+	def cached_embed(queries, norm=None):
+		missing_queries = [q for q in queries if q not in ModelManager.__docvec_dict] 
+		if len(missing_queries) > 0:
+			embeddings = ModelManager.embed(missing_queries, norm)
+			ModelManager.__docvec_dict.update({doc:vec for doc,vec in zip(missing_queries, embeddings)})
+		query_embeddings = [ModelManager.__docvec_dict[q] for q in queries]
+		return query_embeddings
 	
 	@staticmethod
 	def embed(doc_list, norm=None):
@@ -78,9 +87,9 @@ class ModelManager():
 			embedding = normalize(embedding, norm=norm)
 		return embedding
 	
-	def __init__(self, tf_model=None, load_spacy=True):
+	def __init__(self, tf_model=None):
 		# Load Spacy
-		if ModelManager.nlp is None and load_spacy:
+		if ModelManager.nlp is None:
 			ModelManager.nlp = ModelManager.load_nlp_model()
 		# Load TF model
 		if tf_model is None:

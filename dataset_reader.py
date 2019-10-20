@@ -14,18 +14,18 @@ import random
 from sklearn.model_selection import KFold
 
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from model_manager import ModelManager
+from models.role_pattern_extractor import RolePatternExtractor
 
 N_SPLITS = 3
 OVERSAMPLE = True
 TRAIN_EPOCHS = None
 BATCH_SIZE = 4
-EVALUATION_SECONDS = 10
+EVALUATION_SECONDS = 5
 MAX_STEPS = 10**5
 MODEL_DIR = './model'
 TF_MODEL = 'USE_MLQA'
 
-model_manager = ModelManager(tf_model=TF_MODEL, load_spacy=False)
+model_manager = RolePatternExtractor({'tf_model':TF_MODEL})
 
 _, trainset_file, testset_file = sys.argv
 
@@ -38,21 +38,33 @@ def get_formatted_dataset(dataset_file):
 	df['citfunc'].replace(np.NaN, 'none', inplace=True)
 	df['citfunc'].replace('ERROR', 'none', inplace=True)
 	df = df[df.citfunc != 'none']
+	df = df[df.citfunc != 'cites_as_review']
 	df['citfunc'] = df['citfunc'].map(lambda x: x.strip())
 	target_list = df.pop('citfunc').values.tolist()
 
 	# Extract features from dataframe
 	df = df[['anchorsent','sectype']]
-	feature_list = df.columns.values.tolist()
+	
 	# Remove null values
 	df['anchorsent'].replace(np.NaN, '', inplace=True)
 	df['sectype'].replace(np.NaN, 'none', inplace=True)
+
+	df = df[df.anchorsent != '']
+	df['anchorsent'] = df['anchorsent'].map(lambda x: re.sub(r'\[\[.*\]\]','',x))
+	df['anchorsent'] = df['anchorsent'].map(lambda x: re.sub(r'[^\x00-\x7F]+',' ',x))
+
+	extra_list = []
+	for text in df['anchorsent'].values:
+		extra = list(Counter(pattern['predicate'] for pattern in model_manager.get_role_pattern_list(text)).keys())
+		extra_list.append(extra[0] if len(extra)>0 else '')
+	df['extra'] = extra_list
 	
 	# Print dataframe
 	print('Dataframe')
 	print(df)
 	
 	# Return dataset
+	feature_list = df.columns.values.tolist()
 	x_dict = {feature: df[feature].tolist() for feature in feature_list}
 	y_list = target_list
 	return {'x':x_dict, 'y':y_list}
@@ -69,15 +81,16 @@ def clean_dataset(dataset):
 		cache_file = f'{TF_MODEL}.{key}.embedding_cache.pkl'
 		if os.path.isfile(cache_file):
 			with open(cache_file, 'rb') as f:
-				embedded_sentences = pickle.load(f)
+				embedded_sentences,embedded_extra = pickle.load(f)
 		else:
-			df['anchorsent'] = map(lambda x: re.sub(r'\[\[.*\]\]','',x), df['anchorsent'])
-			df['anchorsent'] = map(lambda x: re.sub(r'[^\x00-\x7F]+',' ',x), df['anchorsent'])
 			df['anchorsent'] = list(df['anchorsent'])
 			embedded_sentences = model_manager.embed(df['anchorsent'])
+			df['extra'] = list(df['extra'])
+			embedded_extra = model_manager.embed(df['extra'])
 			with open(cache_file, 'wb') as f:
-				pickle.dump(embedded_sentences, f)
+				pickle.dump((embedded_sentences,embedded_extra), f)
 		df['anchorsent'] = embedded_sentences
+		df['extra'] = embedded_extra
 
 	# Encode labels
 	label_encoder_target = LabelEncoder()
@@ -95,7 +108,7 @@ def clean_dataset(dataset):
 	print('Sectype classes:', list(label_encoder_sectype.classes_))
 	for set in dataset.values():
 		labeled_sectypes = label_encoder_sectype.transform(set['x']['sectype'])
-		set['x']['sectype'] = onehot_encoder_sectype.transform(labeled_sectypes.reshape(-1, 1)).toarray()[:,:-1]
+		set['x']['sectype'] = onehot_encoder_sectype.transform(labeled_sectypes.reshape(-1, 1)).toarray()[:,1:]
 
 	# Input features to numpy array
 	for set in dataset.values():
@@ -223,7 +236,13 @@ def my_model_fn(
 
 	# class_ids will be the model prediction for the class (Iris flower type)
 	# The output node with the highest value is our prediction
-	predictions = { 'class_ids': tf.argmax(input=logits, axis=1) }
+	def sample(logits, random=True):
+		if random:
+			u = tf.random_uniform(tf.shape(logits), dtype=logits.dtype)
+			logits -= tf.log(-tf.log(u))
+		return tf.argmax(logits, axis=1)
+
+	predictions = { 'class_ids': sample(logits, random=False) }
 
 	# 1. Prediction mode
 	# Return our prediction
@@ -264,7 +283,7 @@ def my_model_fn(
 	# Provide global step counter (used to count gradient updates)
 	#optimizer = tf.train.AdagradOptimizer(0.05)
 	#optimizer = tf.train.AdamOptimizer()
-	optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.003)
+	optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.001)
 	train_op = optimizer.minimize(loss, global_step=tf.train.get_or_create_global_step())
 
 	# For Tensorboard
