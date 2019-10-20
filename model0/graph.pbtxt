@@ -2698,8 +2698,8 @@ node {
   }
 }
 node {
-  name: "dense/LeakyRelu"
-  op: "LeakyRelu"
+  name: "dense/Tanh"
+  op: "Tanh"
   input: "dense/BiasAdd"
   attr {
     key: "T"
@@ -2722,10 +2722,30 @@ node {
       }
     }
   }
+}
+node {
+  name: "dropout/Identity"
+  op: "Identity"
+  input: "dense/Tanh"
   attr {
-    key: "alpha"
+    key: "T"
     value {
-      f: 0.20000000298023224
+      type: DT_FLOAT
+    }
+  }
+  attr {
+    key: "_output_shapes"
+    value {
+      list {
+        shape {
+          dim {
+            size: 4
+          }
+          dim {
+            size: 32
+          }
+        }
+      }
     }
   }
 }
@@ -3313,7 +3333,7 @@ node {
 node {
   name: "dense_1/MatMul"
   op: "MatMul"
-  input: "dense/LeakyRelu"
+  input: "dropout/Identity"
   input: "dense_1/kernel/read"
   attr {
     key: "T"
@@ -106397,7 +106417,7 @@ node {
 node {
   name: "gradients/dense_1/MatMul_grad/MatMul_1"
   op: "MatMul"
-  input: "dense/LeakyRelu"
+  input: "dropout/Identity"
   input: "gradients/dense_1/BiasAdd_grad/tuple/control_dependency"
   attr {
     key: "T"
@@ -106510,10 +106530,10 @@ node {
   }
 }
 node {
-  name: "gradients/dense/LeakyRelu_grad/LeakyReluGrad"
-  op: "LeakyReluGrad"
+  name: "gradients/dense/Tanh_grad/TanhGrad"
+  op: "TanhGrad"
+  input: "dense/Tanh"
   input: "gradients/dense_1/MatMul_grad/tuple/control_dependency"
-  input: "dense/BiasAdd"
   attr {
     key: "T"
     value {
@@ -106535,17 +106555,11 @@ node {
       }
     }
   }
-  attr {
-    key: "alpha"
-    value {
-      f: 0.20000000298023224
-    }
-  }
 }
 node {
   name: "gradients/dense/BiasAdd_grad/BiasAddGrad"
   op: "BiasAddGrad"
-  input: "gradients/dense/LeakyRelu_grad/LeakyReluGrad"
+  input: "gradients/dense/Tanh_grad/TanhGrad"
   attr {
     key: "T"
     value {
@@ -106575,12 +106589,12 @@ node {
   name: "gradients/dense/BiasAdd_grad/tuple/group_deps"
   op: "NoOp"
   input: "^gradients/dense/BiasAdd_grad/BiasAddGrad"
-  input: "^gradients/dense/LeakyRelu_grad/LeakyReluGrad"
+  input: "^gradients/dense/Tanh_grad/TanhGrad"
 }
 node {
   name: "gradients/dense/BiasAdd_grad/tuple/control_dependency"
   op: "Identity"
-  input: "gradients/dense/LeakyRelu_grad/LeakyReluGrad"
+  input: "gradients/dense/Tanh_grad/TanhGrad"
   input: "^gradients/dense/BiasAdd_grad/tuple/group_deps"
   attr {
     key: "T"
@@ -106592,7 +106606,7 @@ node {
     key: "_class"
     value {
       list {
-        s: "loc:@gradients/dense/LeakyRelu_grad/LeakyReluGrad"
+        s: "loc:@gradients/dense/Tanh_grad/TanhGrad"
       }
     }
   }
@@ -111824,7 +111838,7 @@ node {
         dtype: DT_STRING
         tensor_shape {
         }
-        string_val: "_temp_8f3087d053114ce1b0e2dc4ba46bdc7c/part"
+        string_val: "_temp_1dd0cc2c056a4641ae792a538b791b2e/part"
       }
     }
   }

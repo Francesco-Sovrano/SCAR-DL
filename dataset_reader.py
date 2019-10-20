@@ -1,8 +1,5 @@
-import sys
-import json
 import numpy as np
 import pandas as pd
-from more_itertools import unique_everseen
 import pickle
 import tensorflow as tf
 import re
@@ -10,13 +7,22 @@ import os
 import tf_metrics
 from imblearn import over_sampling, combine
 from collections import Counter
-import random
+#import random
 from sklearn.model_selection import KFold
-
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from models.role_pattern_extractor import RolePatternExtractor
 
-N_SPLITS = 3
+# Suppress warnings
+import warnings
+warnings.filterwarnings('ignore')
+tf.get_logger().setLevel('ERROR')
+
+# Get inputs
+import sys
+_, trainset_file, testset_file = sys.argv
+
+# Define constants
+N_SPLITS = 5
 OVERSAMPLE = True
 TRAIN_EPOCHS = None
 BATCH_SIZE = 4
@@ -24,11 +30,9 @@ EVALUATION_SECONDS = 5
 MAX_STEPS = 10**5
 MODEL_DIR = './model'
 TF_MODEL = 'USE_MLQA'
+MODEL_MANAGER = RolePatternExtractor({'tf_model':TF_MODEL})
 
-model_manager = RolePatternExtractor({'tf_model':TF_MODEL})
-
-_, trainset_file, testset_file = sys.argv
-
+# Build functions
 def get_formatted_dataset(dataset_file):
 	# Load dataset
 	df = pd.read_csv(dataset_file, sep='	')
@@ -55,7 +59,7 @@ def get_formatted_dataset(dataset_file):
 
 	extra_list = []
 	for text in df['anchorsent'].values:
-		extra = list(Counter(pattern['predicate'] for pattern in model_manager.get_role_pattern_list(text)).keys())
+		extra = list(Counter(pattern['predicate'] for pattern in MODEL_MANAGER.get_role_pattern_list(text)).keys())
 		extra_list.append(extra[0] if len(extra)>0 else '')
 	df['extra'] = extra_list
 	
@@ -84,9 +88,9 @@ def clean_dataset(dataset):
 				embedded_sentences,embedded_extra = pickle.load(f)
 		else:
 			df['anchorsent'] = list(df['anchorsent'])
-			embedded_sentences = model_manager.embed(df['anchorsent'])
+			embedded_sentences = MODEL_MANAGER.embed(df['anchorsent'])
 			df['extra'] = list(df['extra'])
-			embedded_extra = model_manager.embed(df['extra'])
+			embedded_extra = MODEL_MANAGER.embed(df['extra'])
 			with open(cache_file, 'wb') as f:
 				pickle.dump((embedded_sentences,embedded_extra), f)
 		df['anchorsent'] = embedded_sentences
@@ -118,7 +122,7 @@ def clean_dataset(dataset):
 
 def oversample_dataset(set):
 	#numpyfy_dataset(set)
-	print('Before:', len(set['y']))
+	print('Dataset size before oversampling:', len(set['y']))
 
 	# Build combined features
 	combined_features_sizes = {}
@@ -137,9 +141,8 @@ def oversample_dataset(set):
 	#print(combined_features_list[0])
 
 	# Oversample data
-	print('Dataset distribution', Counter(set['y']))
 	combined_features_list = np.array(combined_features_list, dtype=np.object)
-	#combined_features_list, set['y'] = over_sampling.RandomOverSampler().fit_sample(combined_features_list, set['y'])
+	#combined_features_list, set['y'] = over_sampling.RandomOverSampler(sampling_strategy='all').fit_sample(combined_features_list, set['y'])
 	combined_features_list, set['y'] = combine.SMOTETomek().fit_sample(combined_features_list, set['y'])
 	#combined_features_list, set['y'] = over_sampling.ADASYN().fit_sample(combined_features_list, set['y'])
 
@@ -163,7 +166,7 @@ def oversample_dataset(set):
 
 	for feature, value in zip(set['x'].keys(), separated_features):
 		set['x'][feature] = value
-	print('After:', len(set['y']))
+	print('Dataset size after oversampling:', len(set['y']))
 	numpyfy_dataset(set)
 
 def get_dataframe_feature_shape(df, feature):
@@ -185,116 +188,105 @@ def dictify_datalist(datalist):
 		feature_names, x_tuples = zip(*x_tuples)
 		feature = feature_names[0]
 		xs_dict[feature] = np.array(x_tuples)
-		print(feature, len(xs_dict[feature]))
-	print('y', len(y_list))
+		#print(feature, len(xs_dict[feature]))
+	#print('y', len(y_list))
 	return {
 		'x': xs_dict,
 		'y': y_list
 	}
 
-# Load dataset
-trainset = get_formatted_dataset(trainset_file)
-testset = get_formatted_dataset(testset_file)
-
-# Clean dataset
-n_classes = clean_dataset({'train':trainset, 'test':testset})
-
-# Get feature columns
-feature_columns = [
-	get_dataframe_feature_shape(trainset['x'],feature) 
-	for feature in trainset['x'].keys()
-]
-
 # Build DNN Classifier
-def my_model_fn(
-	features, # This is batch_features from input_fn
-	labels,   # This is batch_labels from input_fn
-	mode):	# And instance of tf.estimator.ModeKeys, see below
+def build_model_fn(feature_columns, n_classes):
+	def model_fn(
+		features, # This is batch_features from input_fn
+		labels,   # This is batch_labels from input_fn
+		mode):	# And instance of tf.estimator.ModeKeys, see below
 
-	if mode == tf.estimator.ModeKeys.PREDICT:
-		tf.logging.info("my_model_fn: PREDICT, {}".format(mode))
-	elif mode == tf.estimator.ModeKeys.EVAL:
-		tf.logging.info("my_model_fn: EVAL, {}".format(mode))
-	elif mode == tf.estimator.ModeKeys.TRAIN:
-		tf.logging.info("my_model_fn: TRAIN, {}".format(mode))
+		if mode == tf.estimator.ModeKeys.PREDICT:
+			tf.logging.info("my_model_fn: PREDICT, {}".format(mode))
+		elif mode == tf.estimator.ModeKeys.EVAL:
+			tf.logging.info("my_model_fn: EVAL, {}".format(mode))
+		elif mode == tf.estimator.ModeKeys.TRAIN:
+			tf.logging.info("my_model_fn: TRAIN, {}".format(mode))
 
-	# Create the layer of input
-	input_layer = tf.feature_column.input_layer(features, feature_columns)
-	#input_layer = tf.expand_dims(input_layer, 1)
+		# Create the layer of input
+		input_layer = tf.feature_column.input_layer(features, feature_columns)
+		#input_layer = tf.expand_dims(input_layer, 1)
 
-	input_layer = tf.layers.Dense(32, #3, padding='same',
-		activation=tf.nn.leaky_relu, 
-		#kernel_regularizer=tf.contrib.layers.l2_regularizer(scale=0.003)
-	)(input_layer)
+		input_layer = tf.layers.Dense(32, #3, padding='same',
+			activation=tf.nn.tanh, 
+			#kernel_regularizer=tf.contrib.layers.l2_regularizer(scale=0.003)
+		)(input_layer)
 
-	#input_layer = tf.layers.Dropout()(input_layer)
-	#input_layer = tf.layers.Flatten()(input_layer)
+		input_layer = tf.layers.Dropout()(input_layer)
+		#input_layer = tf.layers.Flatten()(input_layer)
 
-	logits = tf.layers.Dense(n_classes, 
-		#kernel_regularizer=tf.contrib.layers.l2_regularizer(scale=0.003)
-	)(input_layer)
+		logits = tf.layers.Dense(n_classes, 
+			#kernel_regularizer=tf.contrib.layers.l2_regularizer(scale=0.003)
+		)(input_layer)
 
-	# class_ids will be the model prediction for the class (Iris flower type)
-	# The output node with the highest value is our prediction
-	def sample(logits, random=True):
-		if random:
-			u = tf.random_uniform(tf.shape(logits), dtype=logits.dtype)
-			logits -= tf.log(-tf.log(u))
-		return tf.argmax(logits, axis=1)
+		# class_ids will be the model prediction for the class (Iris flower type)
+		# The output node with the highest value is our prediction
+		def sample(logits, random=True):
+			if random:
+				u = tf.random_uniform(tf.shape(logits), dtype=logits.dtype)
+				logits -= tf.log(-tf.log(u))
+			return tf.argmax(logits, axis=1)
 
-	predictions = { 'class_ids': sample(logits, random=False) }
+		predictions = { 'class_ids': sample(logits, random=False) }
 
-	# 1. Prediction mode
-	# Return our prediction
-	if mode == tf.estimator.ModeKeys.PREDICT:
-		return tf.estimator.EstimatorSpec(mode, predictions=predictions)
+		# 1. Prediction mode
+		# Return our prediction
+		if mode == tf.estimator.ModeKeys.PREDICT:
+			return tf.estimator.EstimatorSpec(mode, predictions=predictions)
 
-	# Evaluation and Training mode
+		# Evaluation and Training mode
 
-	# Calculate the loss
-	loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
-	loss += tf.losses.get_regularization_loss()
+		# Calculate the loss
+		loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
+		loss += tf.losses.get_regularization_loss()
 
-	# Calculate the accuracy between the true labels, and our predictions
-	y_true=labels
-	y_pred=predictions['class_ids']
-	average_type_list = ['micro','macro','weighted']
-	metrics = {}
-	for average in average_type_list:
-		metrics[f'precision_{average}'] = tf_metrics.precision(y_true, y_pred, n_classes, average=average)
-		metrics[f'recall_{average}'] = tf_metrics.recall(y_true, y_pred, n_classes, average=average)
-		metrics[f'f1_{average}'] = tf_metrics.f1(y_true, y_pred, n_classes, average=average)
+		# Calculate the accuracy between the true labels, and our predictions
+		y_true=labels
+		y_pred=predictions['class_ids']
+		average_type_list = ['micro','macro','weighted']
+		metrics = {}
+		for average in average_type_list:
+			metrics[f'precision_{average}'] = tf_metrics.precision(y_true, y_pred, n_classes, average=average)
+			metrics[f'recall_{average}'] = tf_metrics.recall(y_true, y_pred, n_classes, average=average)
+			metrics[f'f1_{average}'] = tf_metrics.f1(y_true, y_pred, n_classes, average=average)
 
-	# 2. Evaluation mode
-	# Return our loss (which is used to evaluate our model)
-	# Set the TensorBoard scalar my_accurace to the accuracy
-	# Obs: This function only sets value during mode == ModeKeys.EVAL
-	# To set values during training, see tf.summary.scalar
-	if mode == tf.estimator.ModeKeys.EVAL:
-		return tf.estimator.EstimatorSpec(mode, loss=loss, eval_metric_ops=metrics)
+		# 2. Evaluation mode
+		# Return our loss (which is used to evaluate our model)
+		# Set the TensorBoard scalar my_accurace to the accuracy
+		# Obs: This function only sets value during mode == ModeKeys.EVAL
+		# To set values during training, see tf.summary.scalar
+		if mode == tf.estimator.ModeKeys.EVAL:
+			return tf.estimator.EstimatorSpec(mode, loss=loss, eval_metric_ops=metrics)
 
-	# If mode is not PREDICT nor EVAL, then we must be in TRAIN
-	assert mode == tf.estimator.ModeKeys.TRAIN, "TRAIN is only ModeKey left"
+		# If mode is not PREDICT nor EVAL, then we must be in TRAIN
+		assert mode == tf.estimator.ModeKeys.TRAIN, "TRAIN is only ModeKey left"
 
-	# 3. Training mode
+		# 3. Training mode
 
-	# Default optimizer for DNNClassifier: Adagrad with learning rate=0.05
-	# Our objective (train_op) is to minimize loss
-	# Provide global step counter (used to count gradient updates)
-	#optimizer = tf.train.AdagradOptimizer(0.05)
-	#optimizer = tf.train.AdamOptimizer()
-	optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.001)
-	train_op = optimizer.minimize(loss, global_step=tf.train.get_or_create_global_step())
+		# Default optimizer for DNNClassifier: Adagrad with learning rate=0.05
+		# Our objective (train_op) is to minimize loss
+		# Provide global step counter (used to count gradient updates)
+		#optimizer = tf.train.AdagradOptimizer(0.05)
+		#optimizer = tf.train.AdamOptimizer()
+		optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.001)
+		train_op = optimizer.minimize(loss, global_step=tf.train.get_or_create_global_step())
 
-	# For Tensorboard
-	for metric_name, metric in metrics.items():
-		tf.summary.scalar(metric_name, metric[1])
+		# For Tensorboard
+		for metric_name, metric in metrics.items():
+			tf.summary.scalar(metric_name, metric[1])
 
-	# Return training operations: loss and train_op
-	return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
+		# Return training operations: loss and train_op
+		return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
+	return model_fn
 
-def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, model_dir):
-	# Create a custom estimator using my_model_fn to define the model
+def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, model_dir, feature_columns, n_classes):
+	# Create a custom estimator using model_fn to define the model
 	tf.logging.info("Before classifier construction")
 	run_config = tf.estimator.RunConfig(
 		model_dir=model_dir,
@@ -302,7 +294,7 @@ def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, mod
 		#keep_checkpoint_max=3,
 	)
 	estimator = tf.estimator.Estimator(
-		model_fn=my_model_fn,
+		model_fn=build_model_fn(feature_columns, n_classes),
 		config=run_config,
 	)
 	tf.logging.info("...done constructing classifier")
@@ -329,23 +321,47 @@ def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, mod
 
 	tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
+# Load dataset
+trainset = get_formatted_dataset(trainset_file)
+testset = get_formatted_dataset(testset_file)
+
+# Clean dataset
+n_classes = clean_dataset({'train':trainset, 'test':testset})
+
+# Get feature columns
+feature_columns = [get_dataframe_feature_shape(trainset['x'],feature) for feature in trainset['x'].keys()]
+
 # Get dataset
 trainlist = listify_dataset(trainset)
 testlist = listify_dataset(testset)
 datalist = trainlist + testlist
 #random.shuffle(datalist)
 
-cross_validation = KFold(n_splits=N_SPLITS, shuffle=True, random_state=0)
+# Cross-validate the model
+cross_validation = KFold(n_splits=N_SPLITS, shuffle=True, random_state=1)
 for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
-	print(e, train_index, test_index)
+	print(f'-------- Fold {e} --------')
+	print(f'Train-set {e} indexes {train_index}')
+	print(f'Test-set {e} indexes {test_index}')
 	# Split training and test set
 	trainlist = [datalist[u] for u in train_index]
 	trainset = dictify_datalist(trainlist)
 	# Oversample training set (after sentences embedding)
 	if OVERSAMPLE:
 		oversample_dataset(trainset)
+	print(f'Train-set {e} distribution', Counter(trainset['y']))
 	testlist = [datalist[u] for u in test_index]
 	testset = dictify_datalist(testlist)
+	print(f'Test-set {e} distribution', Counter(testset['y']))
 
-	train_and_evaluate(trainset, testset, TRAIN_EPOCHS, BATCH_SIZE, MAX_STEPS, MODEL_DIR+str(e))
-	break
+	train_and_evaluate(
+		trainset=trainset, 
+		testset=testset, 
+		num_epochs=TRAIN_EPOCHS, 
+		batch_size=BATCH_SIZE, 
+		max_steps=MAX_STEPS, 
+		model_dir=MODEL_DIR+str(e), 
+		feature_columns=feature_columns, 
+		n_classes=n_classes
+	)
+	#break
