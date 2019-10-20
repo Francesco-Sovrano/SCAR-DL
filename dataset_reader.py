@@ -5,7 +5,7 @@ import tensorflow as tf
 import re
 import os
 import tf_metrics
-from imblearn import over_sampling, combine
+from imblearn import over_sampling, under_sampling, combine
 from collections import Counter
 #import random
 from sklearn.model_selection import KFold
@@ -22,10 +22,23 @@ import sys
 _, trainset_file, testset_file = sys.argv
 
 # Define constants
+BATCH_SIZE = 2
 N_SPLITS = 5
-OVERSAMPLE = True
+USE_TEST_SET = False
+USE_PATTERN_EMBEDDING = True
+
+ZERO_CLASS = 'none'
+LABELS_TO_EXCLUDE = [
+	#'cites',
+	'cites_as_review',
+	#'extends', 
+	#'uses_data_from', 
+	#'uses_method_in',
+]
+OVERSAMPLE = False
+UNDERSAMPLE = False
+
 TRAIN_EPOCHS = None
-BATCH_SIZE = 4
 EVALUATION_SECONDS = 5
 MAX_STEPS = 10**5
 MODEL_DIR = './model'
@@ -40,10 +53,14 @@ def get_formatted_dataset(dataset_file):
 
 	# Get target values list
 	df['citfunc'].replace(np.NaN, 'none', inplace=True)
+	df['citfunc'] = df['citfunc'].map(lambda x: x.strip())
+	# Remove rows with excluded labels
+	for label in LABELS_TO_EXCLUDE:
+		df.loc[df.citfunc == label, 'citfunc'] = ZERO_CLASS
+	# Remove bad rows
 	df['citfunc'].replace('ERROR', 'none', inplace=True)
 	df = df[df.citfunc != 'none']
-	df = df[df.citfunc != 'cites_as_review']
-	df['citfunc'] = df['citfunc'].map(lambda x: x.strip())
+	# Extract target list
 	target_list = df.pop('citfunc').values.tolist()
 
 	# Extract features from dataframe
@@ -57,11 +74,12 @@ def get_formatted_dataset(dataset_file):
 	df['anchorsent'] = df['anchorsent'].map(lambda x: re.sub(r'\[\[.*\]\]','',x))
 	df['anchorsent'] = df['anchorsent'].map(lambda x: re.sub(r'[^\x00-\x7F]+',' ',x))
 
-	extra_list = []
-	for text in df['anchorsent'].values:
-		extra = list(Counter(pattern['predicate'] for pattern in MODEL_MANAGER.get_role_pattern_list(text)).keys())
-		extra_list.append(extra[0] if len(extra)>0 else '')
-	df['extra'] = extra_list
+	if USE_PATTERN_EMBEDDING:
+		extra_list = []
+		for text in df['anchorsent'].values:
+			extra = list(Counter(pattern['predicate'] for pattern in MODEL_MANAGER.get_role_pattern_list(text)).keys())
+			extra_list.append(extra[0] if len(extra)>0 else '')
+		df['main_predicate'] = extra_list
 	
 	# Print dataframe
 	print('Dataframe')
@@ -82,19 +100,28 @@ def clean_dataset(dataset):
 	for key,value in dataset.items():
 		df = value['x']
 		# Embed anchor sentences
-		cache_file = f'{TF_MODEL}.{key}.embedding_cache.pkl'
+		cache_file = f'{TF_MODEL}.{key}.anchorsent.embedding_cache.pkl'
 		if os.path.isfile(cache_file):
 			with open(cache_file, 'rb') as f:
-				embedded_sentences,embedded_extra = pickle.load(f)
+				embedded_sentences = pickle.load(f)
 		else:
 			df['anchorsent'] = list(df['anchorsent'])
 			embedded_sentences = MODEL_MANAGER.embed(df['anchorsent'])
-			df['extra'] = list(df['extra'])
-			embedded_extra = MODEL_MANAGER.embed(df['extra'])
 			with open(cache_file, 'wb') as f:
-				pickle.dump((embedded_sentences,embedded_extra), f)
+				pickle.dump(embedded_sentences, f)
 		df['anchorsent'] = embedded_sentences
-		df['extra'] = embedded_extra
+		# Embed extra info
+		if USE_PATTERN_EMBEDDING:
+			cache_file = f'{TF_MODEL}.{key}.extra.embedding_cache.pkl'
+			if os.path.isfile(cache_file):
+				with open(cache_file, 'rb') as f:
+					embedded_extra = pickle.load(f)
+			else:
+				df['main_predicate'] = list(df['main_predicate'])
+				embedded_extra = MODEL_MANAGER.embed(df['main_predicate'])
+				with open(cache_file, 'wb') as f:
+					pickle.dump(embedded_extra, f)
+			df['main_predicate'] = embedded_extra
 
 	# Encode labels
 	label_encoder_target = LabelEncoder()
@@ -120,9 +147,9 @@ def clean_dataset(dataset):
 	# Return number of target classes
 	return len(label_encoder_target.classes_)
 
-def oversample_dataset(set):
+def resample_dataset(set):
 	#numpyfy_dataset(set)
-	print('Dataset size before oversampling:', len(set['y']))
+	print('Dataset size before re-sampling:', len(set['y']))
 
 	# Build combined features
 	combined_features_sizes = {}
@@ -143,8 +170,12 @@ def oversample_dataset(set):
 	# Oversample data
 	combined_features_list = np.array(combined_features_list, dtype=np.object)
 	#combined_features_list, set['y'] = over_sampling.RandomOverSampler(sampling_strategy='all').fit_sample(combined_features_list, set['y'])
-	combined_features_list, set['y'] = combine.SMOTETomek().fit_sample(combined_features_list, set['y'])
-	#combined_features_list, set['y'] = over_sampling.ADASYN().fit_sample(combined_features_list, set['y'])
+	if OVERSAMPLE and UNDERSAMPLE:
+		combined_features_list, set['y'] = combine.SMOTETomek().fit_sample(combined_features_list, set['y'])
+	elif OVERSAMPLE:
+		combined_features_list, set['y'] = over_sampling.ADASYN().fit_sample(combined_features_list, set['y'])
+	elif UNDERSAMPLE:
+		combined_features_list, set['y'] = under_sampling.NeighbourhoodCleaningRule().fit_sample(combined_features_list, set['y'])
 
 	# Separate features
 	new_combined_features_list = []
@@ -166,7 +197,7 @@ def oversample_dataset(set):
 
 	for feature, value in zip(set['x'].keys(), separated_features):
 		set['x'][feature] = value
-	print('Dataset size after oversampling:', len(set['y']))
+	print('Dataset size after re-sampling:', len(set['y']))
 	numpyfy_dataset(set)
 
 def get_dataframe_feature_shape(df, feature):
@@ -195,7 +226,6 @@ def dictify_datalist(datalist):
 		'y': y_list
 	}
 
-# Build DNN Classifier
 def build_model_fn(feature_columns, n_classes):
 	def model_fn(
 		features, # This is batch_features from input_fn
@@ -213,7 +243,7 @@ def build_model_fn(feature_columns, n_classes):
 		input_layer = tf.feature_column.input_layer(features, feature_columns)
 		#input_layer = tf.expand_dims(input_layer, 1)
 
-		input_layer = tf.layers.Dense(32, #3, padding='same',
+		input_layer = tf.layers.Dense(16, #3, padding='same',
 			activation=tf.nn.tanh, 
 			#kernel_regularizer=tf.contrib.layers.l2_regularizer(scale=0.003)
 		)(input_layer)
@@ -274,7 +304,7 @@ def build_model_fn(feature_columns, n_classes):
 		# Provide global step counter (used to count gradient updates)
 		#optimizer = tf.train.AdagradOptimizer(0.05)
 		#optimizer = tf.train.AdamOptimizer()
-		optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.001)
+		optimizer = tf.train.ProximalAdagradOptimizer(learning_rate=0.01, l2_regularization_strength=0.003)
 		train_op = optimizer.minimize(loss, global_step=tf.train.get_or_create_global_step())
 
 		# For Tensorboard
@@ -333,8 +363,11 @@ feature_columns = [get_dataframe_feature_shape(trainset['x'],feature) for featur
 
 # Get dataset
 trainlist = listify_dataset(trainset)
-testlist = listify_dataset(testset)
-datalist = trainlist + testlist
+if USE_TEST_SET:
+	testlist = listify_dataset(testset)
+	datalist = trainlist + testlist
+else:
+	datalist = trainlist
 #random.shuffle(datalist)
 
 # Cross-validate the model
@@ -347,8 +380,8 @@ for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
 	trainlist = [datalist[u] for u in train_index]
 	trainset = dictify_datalist(trainlist)
 	# Oversample training set (after sentences embedding)
-	if OVERSAMPLE:
-		oversample_dataset(trainset)
+	if OVERSAMPLE or UNDERSAMPLE:
+		resample_dataset(trainset)
 	print(f'Train-set {e} distribution', Counter(trainset['y']))
 	testlist = [datalist[u] for u in test_index]
 	testset = dictify_datalist(testlist)
