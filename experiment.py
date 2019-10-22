@@ -7,6 +7,9 @@ import os
 import tf_metrics
 from imblearn import over_sampling, under_sampling, combine
 from collections import Counter
+from tensorflow.core.util import event_pb2
+from tensorflow.python.lib.io import tf_record
+from misc.doc_reader import get_document_list
 #import random
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
@@ -46,7 +49,7 @@ TF_MODEL = 'USE_MLQA'
 MODEL_MANAGER = RolePatternExtractor({'tf_model':TF_MODEL})
 
 # Build functions
-def get_formatted_dataset(dataset_file):
+def get_dataframe(dataset_file):
 	# Load dataset
 	df = pd.read_csv(dataset_file, sep='	')
 	#print(df.dtypes)
@@ -95,7 +98,7 @@ def numpyfy_dataset(set):
 	set['x'] = {k: np.array(v) for k,v in set['x'].items()}
 	set['y'] = np.array(set['y'])
 
-def clean_dataset(dataset):
+def encode_dataset(dataset):
 	# Embed anchor sentences into vectors
 	for key,value in dataset.items():
 		df = value['x']
@@ -147,7 +150,7 @@ def clean_dataset(dataset):
 	# Return number of target classes
 	return len(label_encoder_target.classes_)
 
-def resample_dataset(set):
+def resample_dataset(set, oversample=True, undersample=True):
 	#numpyfy_dataset(set)
 	print('Dataset size before re-sampling:', len(set['y']))
 
@@ -170,11 +173,11 @@ def resample_dataset(set):
 	# Oversample data
 	combined_features_list = np.array(combined_features_list, dtype=np.object)
 	#combined_features_list, set['y'] = over_sampling.RandomOverSampler(sampling_strategy='all').fit_sample(combined_features_list, set['y'])
-	if OVERSAMPLE and UNDERSAMPLE:
+	if oversample and undersample:
 		combined_features_list, set['y'] = combine.SMOTETomek().fit_sample(combined_features_list, set['y'])
-	elif OVERSAMPLE:
+	elif oversample:
 		combined_features_list, set['y'] = over_sampling.ADASYN().fit_sample(combined_features_list, set['y'])
-	elif UNDERSAMPLE:
+	elif undersample:
 		combined_features_list, set['y'] = under_sampling.NeighbourhoodCleaningRule().fit_sample(combined_features_list, set['y'])
 
 	# Separate features
@@ -315,6 +318,27 @@ def build_model_fn(feature_columns, n_classes):
 		return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 	return model_fn
 
+def get_summary_results(summary_dir):
+	def my_summary_iterator(path):
+		for r in tf_record.tf_record_iterator(path):
+			yield event_pb2.Event.FromString(r)
+
+	result_list = []
+	document_list = get_document_list(summary_dir)
+	#print(document_list)
+	for filename in document_list:
+		if not filename.endswith('.local'):
+			continue
+		value_dict = {}
+		for event in my_summary_iterator(filename):
+			for value in event.summary.value:
+				tag = value.tag
+				if tag not in value_dict:
+					value_dict[tag]=[]
+				value_dict[tag].append((event.step, value.simple_value))
+		result_list.append({'event_name':filename, 'results':value_dict})
+	return result_list
+
 def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, model_dir, feature_columns, n_classes):
 	# Create a custom estimator using model_fn to define the model
 	tf.logging.info("Before classifier construction")
@@ -352,16 +376,16 @@ def train_and_evaluate(trainset, testset, num_epochs, batch_size, max_steps, mod
 	tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
 # Load dataset
-trainset = get_formatted_dataset(trainset_file)
-testset = get_formatted_dataset(testset_file)
+trainset = get_dataframe(trainset_file)
+testset = get_dataframe(testset_file)
 
-# Clean dataset
-n_classes = clean_dataset({'train':trainset, 'test':testset})
+# Encode dataset
+n_classes = encode_dataset({'train':trainset, 'test':testset})
 
 # Get feature columns
 feature_columns = [get_dataframe_feature_shape(trainset['x'],feature) for feature in trainset['x'].keys()]
 
-# Get dataset
+# Build datalist
 trainlist = listify_dataset(trainset)
 if USE_TEST_SET:
 	testlist = listify_dataset(testset)
@@ -371,6 +395,7 @@ else:
 #random.shuffle(datalist)
 
 # Cross-validate the model
+summary_results_list = []
 cross_validation = KFold(n_splits=N_SPLITS, shuffle=True, random_state=1)
 for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
 	print(f'-------- Fold {e} --------')
@@ -381,7 +406,7 @@ for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
 	trainset = dictify_datalist(trainlist)
 	# Oversample training set (after sentences embedding)
 	if OVERSAMPLE or UNDERSAMPLE:
-		resample_dataset(trainset)
+		resample_dataset(trainset, oversample=OVERSAMPLE, undersample=UNDERSAMPLE)
 	print(f'Train-set {e} distribution', Counter(trainset['y']))
 	testlist = [datalist[u] for u in test_index]
 	testset = dictify_datalist(testlist)
@@ -397,4 +422,7 @@ for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
 		feature_columns=feature_columns, 
 		n_classes=n_classes
 	)
+	summary_results = get_summary_results(f'./{MODEL_DIR}{e}/eval')
+	print(f'Test-set {e} results:', summary_results)
+	summary_results_list.append(summary_results)
 	#break
