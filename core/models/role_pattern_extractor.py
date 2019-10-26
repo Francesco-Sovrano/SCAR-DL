@@ -33,13 +33,16 @@ class RolePatternExtractor(ModelManager):
 		if predicate_core is None:
 			return None
 
-		predicate = [
-			child
-			for child in predicate_core.children
-			if re.search(r'(aux|neg)', CE.get_token_dependency(child))
-		] if not self.use_lemma else []
-		predicate.append(predicate_core)
-		predicate = sorted(predicate, key=lambda x: x.i)#, reverse=False if 'subj' in token.dep_ else True)
+		if not self.use_lemma:
+			predicate = [
+				child
+				for child in predicate_core.children
+				if re.search(r'(aux|neg)', CE.get_token_dependency(child))
+			]
+			predicate.append(predicate_core)
+			predicate = sorted(predicate, key=lambda x: x.i)#, reverse=False if 'subj' in token.dep_ else True)
+		else:
+			predicate = [predicate_core.lemma_]
 		return {'predicate':predicate, 'dependency':CE.get_token_dependency(token)}
 
 	def get_role_pattern_list(self, text):
