@@ -1,25 +1,26 @@
 from models.model_manager import ModelManager
 from collections import Counter
+import nltk
+nltk.download('stopwords')
 from nltk.corpus import stopwords
 import re
 from more_itertools import unique_everseen
 from misc.doc_reader import get_content_list
 
-CONCEPT_IDENTIFIER = [
-	'subj',
-	'obj'
-]
-FELLOW_IDENTIFIER = [ # https://universaldependencies.org/u/dep/all.html
-	'comp', 'mod', # Clauses
-	'fixed', 'flat', 'compound',
-	'acl', 'pos', 'fixed', 'prep', 'aux'
-]
-
-CORE_CONCEPT_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER))
-COMPOSITE_CONCEPT_REGEXP = re.compile('|'.join(FELLOW_IDENTIFIER))
-CONCEPT_GROUP_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER+FELLOW_IDENTIFIER))
-
 class ConceptExtractor(ModelManager):
+	CONCEPT_IDENTIFIER = [
+		'subj',
+		'obj'
+	]
+	FELLOW_IDENTIFIER = [ # https://universaldependencies.org/u/dep/all.html
+		'comp', 'mod', # Clauses
+		'fixed', 'flat', 'compound',
+		'acl', 'pos', 'fixed', 'prep', 'aux'
+	]
+
+	CORE_CONCEPT_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER))
+	COMPOSITE_CONCEPT_REGEXP = re.compile('|'.join(FELLOW_IDENTIFIER))
+	CONCEPT_GROUP_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER+FELLOW_IDENTIFIER))
 	
 	def __init__(self, model_options):
 		super().__init__(model_options['tf_model'])
@@ -59,22 +60,22 @@ class ConceptExtractor(ModelManager):
 		core_concept_list = [
 			token
 			for token in processed_doc
-			if re.search(CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(token))
+			if re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(token))
 		]
 		#print([(token.text,ConceptExtractor.get_token_dependency(token),list(token.ancestors)) for token in core_concept_list])
 
 		concept_list = []
 		for t in core_concept_list:
 			core_concept = [t]
-			concept_group = sorted(core_concept + ConceptExtractor.get_fellow_list(t, CONCEPT_GROUP_REGEXP), key=lambda x: x.idx)
-			composite_concept = sorted(core_concept + ConceptExtractor.get_fellow_list(t, COMPOSITE_CONCEPT_REGEXP), key=lambda x: x.idx)
+			concept_group = sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.CONCEPT_GROUP_REGEXP), key=lambda x: x.idx)
+			composite_concept = sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.COMPOSITE_CONCEPT_REGEXP), key=lambda x: x.idx)
 
 			related_concept_list = [core_concept, concept_group, composite_concept]
 			sub_concept_group = []
 			for c in concept_group:
 				if ConceptExtractor.get_token_dependency(c) != 'prep':
 					sub_concept_group.append(c)
-				if ConceptExtractor.get_token_dependency(c) == 'prep' or re.search(CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(c)):
+				if ConceptExtractor.get_token_dependency(c) == 'prep' or re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(c)):
 					if len(sub_concept_group) > 0:
 						related_concept_list.append(sub_concept_group)
 						sub_concept_group = []

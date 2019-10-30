@@ -1,12 +1,22 @@
 import spacy # for natural language processing
 # python3 -m spacy download en_core_web_md
 from sklearn.preprocessing import normalize
+import os
 
 SPACY_MODEL = 'en_core_web_md'
 MODULE_URL = {
-	'USE_Transformer': '/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/slow', # 'https://tfhub.dev/google/universal-sentence-encoder-large/3',
-	'USE_DAN': '/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/fast', # 'https://tfhub.dev/google/universal-sentence-encoder/2',
-	'USE_MLQA': '/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/multilingual-qa', # 'https://tfhub.dev/google/universal-sentence-encoder-multilingual-qa/1',
+	'USE_Transformer': {
+		'local':'/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/slow', 
+		'remote': 'https://tfhub.dev/google/universal-sentence-encoder-large/3',
+	},
+	'USE_DAN': {
+		'local':'/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/fast',
+		'remote': 'https://tfhub.dev/google/universal-sentence-encoder/2',
+	},
+	'USE_MLQA': {
+		'local':'/Users/toor/Desktop/NLP/Tutorials/Sentence Embedding/Universal Sentence Encoder/multilingual-qa',
+		'remote': 'https://tfhub.dev/google/universal-sentence-encoder-multilingual-qa/1',
+	},
 }
 
 class ModelManager():
@@ -52,7 +62,9 @@ class ModelManager():
 		with g.as_default():
 			# We will be feeding 1D tensors of text into the graph.
 			text_input = tf.placeholder(dtype=tf.string, shape=[None])
-			embed = TFHubModule(MODULE_URL[tf_model], trainable=False)
+			model_dict = MODULE_URL[tf_model]
+			model_url = model_dict['local'] if os.path.isdir(model_dict['local']) else model_dict['remote']
+			embed = TFHubModule(model_url, trainable=False)
 			embedded_text = embed(text_input)
 			init_op = tf.group([tf.global_variables_initializer(), tf.tables_initializer()])
 		g.finalize() # Finalizes this graph, making it read-only.
