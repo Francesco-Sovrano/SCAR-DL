@@ -14,8 +14,9 @@ class ConceptExtractor(ModelManager):
 	]
 	FELLOW_IDENTIFIER = [ # https://universaldependencies.org/u/dep/all.html
 		'comp', 'mod', # Clauses
-		'fixed', 'flat', 'compound',
-		'acl', 'pos', 'fixed', 'prep', 'aux'
+		'fixed', 'flat', #'compound',
+		'acl', 'pos', 'prep', 'aux',
+		'case', #'agent',
 	]
 
 	CORE_CONCEPT_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER))
@@ -30,22 +31,25 @@ class ConceptExtractor(ModelManager):
 		return ' '.join(c.text for c in concept)
 
 	@staticmethod
-	def get_fellow_list(token, regexp, trim_prepositions=True):
-		children_list = []
+	def get_fellow_list(token, regexp):
+		token_list = []
 		for a in token.children:
 			'''
 			if a.pos_ == 'VERB':
 				continue
 			'''
 			if re.search(regexp, ConceptExtractor.get_token_dependency(a)):
-				children_list.append(a)
-				children_list.extend(ConceptExtractor.get_fellow_list(a, regexp, False))
-		if trim_prepositions:
-			while len(children_list) > 0 and ConceptExtractor.get_token_dependency(children_list[-1]) == 'prep':
-				del children_list[-1]
-			while len(children_list) > 0 and ConceptExtractor.get_token_dependency(children_list[0]) == 'prep':
-				del children_list[0]
-		return children_list
+				token_list.append(a)
+				token_list.extend(ConceptExtractor.get_fellow_list(a, regexp))
+		return token_list
+
+	@staticmethod
+	def trim_prepositions(token_list):
+		while len(token_list) > 0 and ConceptExtractor.get_token_dependency(token_list[-1]) == 'prep':
+			del token_list[-1]
+		while len(token_list) > 0 and ConceptExtractor.get_token_dependency(token_list[0]) == 'prep':
+			del token_list[0]
+		return token_list
 
 	@staticmethod
 	def get_token_dependency(token):
@@ -59,7 +63,8 @@ class ConceptExtractor(ModelManager):
 	def get_concept_list(processed_doc):
 		core_concept_list = [
 			token
-			for token in processed_doc
+			for sentence in processed_doc.sents
+			for token in sentence
 			if re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(token))
 		]
 		#print([(token.text,ConceptExtractor.get_token_dependency(token),list(token.ancestors)) for token in core_concept_list])
@@ -67,8 +72,8 @@ class ConceptExtractor(ModelManager):
 		concept_list = []
 		for t in core_concept_list:
 			core_concept = [t]
-			concept_group = sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.CONCEPT_GROUP_REGEXP), key=lambda x: x.idx)
-			composite_concept = sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.COMPOSITE_CONCEPT_REGEXP), key=lambda x: x.idx)
+			concept_group = ConceptExtractor.trim_prepositions(sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.CONCEPT_GROUP_REGEXP), key=lambda x: x.idx))
+			composite_concept = ConceptExtractor.trim_prepositions(sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.COMPOSITE_CONCEPT_REGEXP), key=lambda x: x.idx))
 
 			related_concept_list = [core_concept, concept_group, composite_concept]
 			sub_concept_group = []
@@ -85,7 +90,7 @@ class ConceptExtractor(ModelManager):
 			#related_concept_list = unique_everseen(related_concept_list, key=lambda c: ConceptExtractor.get_concept_text(c))
 			concept_list.extend(related_concept_list)
 
-		concept_list = unique_everseen(concept_list, key=lambda c: ConceptExtractor.get_concept_text(c['concept']).lower().strip())
+		concept_list = unique_everseen(concept_list, key=lambda c: ConceptExtractor.get_concept_text(c['concept']).lower().strip() + '.' + str(c['core'].i))
 		return concept_list
 
 	def get_concept_dict(self, sentence_list):
