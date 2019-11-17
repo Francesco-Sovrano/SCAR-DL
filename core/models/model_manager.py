@@ -2,6 +2,9 @@ import spacy # for natural language processing
 # python3 -m spacy download en_core_web_md
 from sklearn.preprocessing import normalize
 import os
+import re
+import numpy as np
+from misc.doc_reader import get_content_list
 
 SPACY_MODEL = 'en_core_web_md'
 MODULE_URL = {
@@ -98,6 +101,53 @@ class ModelManager():
 		if norm is not None:
 			embedding = normalize(embedding, norm=norm)
 		return embedding
+
+	@staticmethod
+	def get_similarity_vector(source_text, target_text_list, similarity_fn=np.inner, cached=True):
+		embedding_fn = ModelManager.cached_embed if cached else ModelManager.embed
+		embeddings = embedding_fn([source_text]+list(target_text_list))
+		source_embedding = embeddings[0]
+		target_embeddings = embeddings[1:]
+		return similarity_fn(source_embedding,target_embeddings)
+
+	@staticmethod
+	def find_most_similar(source_text, target_text_list, similarity_fn=np.inner, cached=True):
+		similarity_vec = ModelManager.get_similarity_vector(
+			source_text=source_text, 
+			target_text_list=target_text_list, 
+			similarity_fn=similarity_fn, 
+			cached=cached,
+		)
+		argmax = np.argmax(similarity_vec)
+		return argmax, similarity_vec[argmax]
+
+	@staticmethod
+	def filter_content(content):
+		paragraph_list = []
+		for text in content.split('\n\n'):
+			if text.count(' ') < 3:
+				continue
+			parsed_text = ModelManager.nlp(text)
+			'''
+			verb_list = [token for token in parsed_text if token.pos_=='VERB']
+			if len(verb_list) > 0:
+				paragraph_list.append(text)
+			'''
+			for token in parsed_text:
+				if token.pos_=='VERB':
+					paragraph_list.append(text)
+					break
+		content = ' '.join(paragraph_list)
+		content = re.sub(r'\. ', '.\n\n', content)
+		return content
+
+	@staticmethod
+	def get_sentence_iterator_from_docpath(docpath):
+		return (
+			sentence
+			for doc in get_content_list(docpath)
+			for sentence in ModelManager.nlp(ModelManager.filter_content(doc)).sents
+		)
 	
 	def __init__(self, tf_model=None):
 		# Load Spacy

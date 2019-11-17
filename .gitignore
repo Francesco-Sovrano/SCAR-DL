@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# MAC-only files
+.DS_Store
+
+# pickle files
+*.pkl
+*.zip
+ray_results/
+
+# models
+model*/
+
+# jupyter notebook
+.ipynb_checkpoints/

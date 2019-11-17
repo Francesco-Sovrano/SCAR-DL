@@ -5,7 +5,6 @@ nltk.download('stopwords')
 from nltk.corpus import stopwords
 import re
 from more_itertools import unique_everseen
-from misc.doc_reader import get_content_list
 
 class ConceptExtractor(ModelManager):
 	CONCEPT_IDENTIFIER = [
@@ -17,6 +16,7 @@ class ConceptExtractor(ModelManager):
 		'fixed', 'flat', #'compound',
 		'acl', 'pos', 'prep', 'aux',
 		'case', #'agent',
+		'neg',
 	]
 
 	CORE_CONCEPT_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER))
@@ -24,23 +24,34 @@ class ConceptExtractor(ModelManager):
 	CONCEPT_GROUP_REGEXP = re.compile('|'.join(CONCEPT_IDENTIFIER+FELLOW_IDENTIFIER))
 	
 	def __init__(self, model_options):
+		self.min_concept_size = model_options.get('min_concept_size',2)
 		super().__init__(model_options['tf_model'])
+
+	@staticmethod
+	def lemmatize_span(span, prevent_verb_lemmatization=True):
+		return ' '.join(
+			e.lemma_ if not prevent_verb_lemmatization or e.pos_!='VERB' else e.text 
+			for e in span 
+			if e.lemma_ != '-PRON-'
+		)
 
 	@staticmethod
 	def get_concept_text(concept):
 		return ' '.join(c.text for c in concept)
 
 	@staticmethod
-	def get_fellow_list(token, regexp):
+	def get_fellow_list(token, regexp, min_concept_size=1):
 		token_list = []
 		for a in token.children:
+			if len(a.text) < min_concept_size:
+				continue
 			'''
 			if a.pos_ == 'VERB':
 				continue
 			'''
 			if re.search(regexp, ConceptExtractor.get_token_dependency(a)):
 				token_list.append(a)
-				token_list.extend(ConceptExtractor.get_fellow_list(a, regexp))
+				token_list.extend(ConceptExtractor.get_fellow_list(a, regexp, min_concept_size))
 		return token_list
 
 	@staticmethod
@@ -60,27 +71,57 @@ class ConceptExtractor(ModelManager):
 				return t.dep_
 
 	@staticmethod
-	def get_concept_list(processed_doc):
+	def get_consecutive_tokens(core_concept, concept_span):
+		core_concept_index_in_list = concept_span.index(core_concept)
+		core_concept_index_in_span = core_concept.i
+		return [
+			t
+			for i,t in enumerate(concept_span)
+			if abs(t.i-core_concept_index_in_span) == abs(i-core_concept_index_in_list)
+		]
+
+	@staticmethod
+	def get_composite_concept(core_concept, min_concept_size=1):
+		concept_span = [core_concept] + ConceptExtractor.get_fellow_list(core_concept, ConceptExtractor.COMPOSITE_CONCEPT_REGEXP, min_concept_size)
+		concept_span.sort(key=lambda x: x.idx)
+		concept_span = ConceptExtractor.get_consecutive_tokens(core_concept, concept_span)
+		concept_span = ConceptExtractor.trim_prepositions(concept_span)
+		return concept_span
+
+	@staticmethod
+	def get_concept_group(core_concept, min_concept_size=1):
+		concept_span = [core_concept] + ConceptExtractor.get_fellow_list(core_concept, ConceptExtractor.CONCEPT_GROUP_REGEXP, min_concept_size)
+		concept_span.sort(key=lambda x: x.idx)
+		concept_span = ConceptExtractor.get_consecutive_tokens(core_concept, concept_span)
+		concept_span = ConceptExtractor.trim_prepositions(concept_span)
+		return concept_span
+
+	@staticmethod
+	def get_concept_list(processed_doc, min_concept_size=1):
 		core_concept_list = [
 			token
-			for sentence in processed_doc.sents
-			for token in sentence
+			#for sentence in processed_doc.sents
+			#for token in sentence
+			for token in processed_doc
 			if re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(token))
 		]
 		#print([(token.text,ConceptExtractor.get_token_dependency(token),list(token.ancestors)) for token in core_concept_list])
 
 		concept_list = []
 		for t in core_concept_list:
+			if len(t.text) < min_concept_size:
+				continue
 			core_concept = [t]
-			concept_group = ConceptExtractor.trim_prepositions(sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.CONCEPT_GROUP_REGEXP), key=lambda x: x.idx))
-			composite_concept = ConceptExtractor.trim_prepositions(sorted(core_concept + ConceptExtractor.get_fellow_list(t, ConceptExtractor.COMPOSITE_CONCEPT_REGEXP), key=lambda x: x.idx))
+			concept_group = ConceptExtractor.get_concept_group(t, min_concept_size)
+			composite_concept = ConceptExtractor.get_composite_concept(t, min_concept_size)
 
 			related_concept_list = [core_concept, concept_group, composite_concept]
 			sub_concept_group = []
 			for c in concept_group:
-				if ConceptExtractor.get_token_dependency(c) != 'prep':
+				c_dep = ConceptExtractor.get_token_dependency(c)
+				if c_dep != 'prep':
 					sub_concept_group.append(c)
-				if ConceptExtractor.get_token_dependency(c) == 'prep' or re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, ConceptExtractor.get_token_dependency(c)):
+				if c_dep == 'prep' or re.search(ConceptExtractor.CORE_CONCEPT_REGEXP, c_dep):
 					if len(sub_concept_group) > 0:
 						related_concept_list.append(sub_concept_group)
 						sub_concept_group = []
@@ -93,70 +134,48 @@ class ConceptExtractor(ModelManager):
 		concept_list = unique_everseen(concept_list, key=lambda c: ConceptExtractor.get_concept_text(c['concept']).lower().strip() + '.' + str(c['core'].i))
 		return concept_list
 
-	def get_concept_dict(self, sentence_list):
+	def build_concept_counter_dict(self, concept_list, concept_dict={}):
+		concept_counter = Counter(concept_list)
+		concept_dict.update({
+			concept: {
+				'count': count, 
+				'embedding': self.cached_embed([concept]), 
+			}
+			for concept,count in concept_counter.items()
+		})
+		return concept_dict
+
+	def get_concept_dict(self, sentence_iterator, remove_stopwords=True):
 		concept_dict = {}
-		for sentence in sentence_list:
+		for sentence in sentence_iterator:
 			if sentence.text.count(' ') < 3:
 				continue
 			sentence_embedding = self.embed([sentence.text])
 			sentence_concept_list = [
-				ConceptExtractor.get_concept_text(concept_dict['concept']).lower() # do not lemmatize syntagmas
-				if len(concept_dict['concept']) > 1 else
-				concept_dict['concept'][0].lemma_.lower() # lemmatize words
-				for concept_dict in ConceptExtractor.get_concept_list(sentence)
+				self.lemmatize_span(concept_dict['concept']).lower() # do lemmatize syntagmas
+				for concept_dict in ConceptExtractor.get_concept_list(sentence, self.min_concept_size)
 				if len(concept_dict['concept']) > 0
 			]
-			for concept in sentence_concept_list:
-				if concept not in concept_dict:
-					concept_dict[concept] = {
-						'count': 1, 
-						'embedding': self.cached_embed([concept]), 
-						'sentence_embedding_list': []
-					}
-				else:
-					concept_dict[concept]['count'] += 1
+			concept_dict = self.build_concept_counter_dict(sentence_concept_list, concept_dict)
 			for concept in unique_everseen(sentence_concept_list):
+				if 'sentence_embedding_list' not in concept_dict[concept]:
+					concept_dict[concept]['sentence_embedding_list'] = []
 				concept_dict[concept]['sentence_embedding_list'].append(sentence_embedding)
 
 		# remove stopwords
-		word_list = list(concept_dict.keys())
-		for word in word_list:
-			if word == '-pron-':
-				del concept_dict[word]
-			elif word in stopwords.words('english'):
-				del concept_dict[word]
-			elif re.search(r'\d+',word):
-				del concept_dict[word]
+		if remove_stopwords:
+			word_list = list(concept_dict.keys())
+			for word in word_list:
+				if word == '':
+					del concept_dict[word]
+				elif word in stopwords.words('english'):
+					del concept_dict[word]
+				#elif re.search(r'\d+',word):
+				#	del concept_dict[word]
 
 		return concept_dict
 
-	def filter_content(self, content):
-		paragraph_list = []
-		for text in content.split('\n\n'):
-			if text.count(' ') < 3:
-				continue
-			parsed_text = self.nlp(text)
-			'''
-			verb_list = [token for token in parsed_text if token.pos_=='VERB']
-			if len(verb_list) > 0:
-				paragraph_list.append(text)
-			'''
-			for token in parsed_text:
-				if token.pos_=='VERB':
-					paragraph_list.append(text)
-					break
-		content = ' '.join(paragraph_list)
-		content = re.sub(r'\. ', '.\n\n', content)
-		return content
-
-	def get_sentence_list(self, doc):
-		return self.nlp(self.filter_content(doc)).sents
-
 	def get_concept_dict_from_docpath(self, docpath):
-		sentence_list = (
-			sentence
-			for doc in get_content_list(docpath)
-			for sentence in self.get_sentence_list(doc)
-		)
-		return self.get_concept_dict(sentence_list)
+		sentence_iterator = self.get_sentence_iterator_from_docpath(docpath)
+		return self.get_concept_dict(sentence_iterator)
 	
