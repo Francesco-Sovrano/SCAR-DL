@@ -76,8 +76,10 @@ tf.get_logger().setLevel('ERROR')
 # In[ ]:
 
 
-USE_TEST_SET = False
+USE_SCICITE = True
+USE_ACLARC = True
 USE_PATTERN_EMBEDDING = True
+USE_TEST_SET = False
 
 ZERO_CLASS = 'none'
 LABELS_TO_EXCLUDE = [
@@ -95,6 +97,31 @@ EVALUATION_STEPS = MAX_STEPS/EVALUATION_PER_TRAINING
 MODEL_DIR = './model'
 TF_MODEL = 'USE_MLQA'
 MODEL_OPTIONS = {'tf_model':TF_MODEL, 'use_lemma':False}
+
+
+# Define function for extracting probabilities from scicite models
+
+# In[ ]:
+
+
+def fuse_with_scicite_model(df, dataset_file, model_name):
+	filename = dataset_file+'.'+model_name+'.json'
+	print(f'Reading {filename}..')
+	extra_df = pd.read_json(filename)
+	extra_df = extra_df[['probabilities','string']]
+	feature_name = model_name+'_prediction'
+	extra_df = extra_df.rename(columns={
+		'probabilities': feature_name, 
+		'string': 'anchorsent',
+	})
+	df = df.set_index('anchorsent').join(extra_df.set_index('anchorsent'), on='anchorsent')
+	df = df.reset_index().rename(columns={'index': 'anchorsent'})
+	class_size = max(map(lambda x: len(x), filter(lambda x: type(x) in [list,tuple,np.array], df[feature_name].to_list())))
+	print(f'{model_name} has class size {class_size}')
+	df[feature_name] = df[feature_name].map(lambda x: np.zeros(class_size)+1/class_size if not(type(x) in [list,tuple,np.array] and len(x)== class_size) else x)
+	for e in df[feature_name].to_list():
+		assert(len(e)==class_size)
+	return df
 
 
 # Define function for converting input datasets from csv to pandas dataframe
@@ -130,18 +157,12 @@ def get_dataframe(dataset_file):
 	df['anchorsent'] = df['anchorsent'].map(lambda x: re.sub(r"^'(.*)'$",r'\1',x))
     
 	# Join with scicite output
-	scicite_df = pd.read_json(dataset_file+'.scicite.json')
-	scicite_df = scicite_df[['probabilities','string']]
-	scicite_df = scicite_df.rename(columns={
-		'probabilities': 'scicite_prediction', 
-		'string': 'anchorsent',
-	})
-	df = df.set_index('anchorsent').join(scicite_df.set_index('anchorsent'), on='anchorsent')
-	df = df.reset_index().rename(columns={'index': 'anchorsent'})
-	df['scicite_prediction'] = df['scicite_prediction'].map(lambda x: [1/3,1/3,1/3] if not(type(x) in [list,tuple,np.array] and len(x)== 3) else x)
-	#df = df[df['scicite_prediction'].map(lambda x: type(x) in [list,tuple,np.array] and len(x)== 3)]
-	#for e in df['scicite_prediction'].to_list():
-	#	assert(len(e)==3)
+	if USE_SCICITE:
+		df = fuse_with_scicite_model(df, dataset_file, 'scicite')
+        
+	# Join with ac_larc output
+	if USE_ACLARC:
+		df = fuse_with_scicite_model(df, dataset_file, 'aclarc')
 
 	# Print dataframe
 	print('Dataframe')
@@ -681,7 +702,7 @@ experiment_name = 'hp_tuning'
 local_dir = os.path.join('.','ray_results')
 analysis = tune.run( # https://ray.readthedocs.io/en/latest/tune-package-ref.html#ray.tune.run
     build_cross_validate_model(datalist),
-    num_samples=3, # Number of times to sample from the hyperparameter space. Defaults to 1. If grid_search is provided as an argument, the grid will be repeated num_samples of times.
+    num_samples=1, # Number of times to sample from the hyperparameter space. Defaults to 1. If grid_search is provided as an argument, the grid will be repeated num_samples of times.
     name=experiment_name,
     local_dir=local_dir,
     resume=os.path.isdir(os.path.join(local_dir,experiment_name)),
@@ -697,7 +718,7 @@ analysis = tune.run( # https://ray.readthedocs.io/en/latest/tune-package-ref.htm
             None,
             #combine.SMOTEENN, 
             combine.SMOTETomek, 
-            over_sampling.RandomOverSampler,
+            #over_sampling.RandomOverSampler,
             over_sampling.SMOTE,
             over_sampling.ADASYN,
             #under_sampling.RandomUnderSampler,
@@ -706,20 +727,20 @@ analysis = tune.run( # https://ray.readthedocs.io/en/latest/tune-package-ref.htm
         ]),
         "BATCH_SIZE": tune.grid_search([
             2,
-            3, 
+            #3, 
             4,
         ]),
         'UNITS': tune.grid_search([
             4, 
-            6, 
+            #6, 
             8, 
-            10,
+            #10,
             12,
         ]),
         'ACTIVATION_FUNCTION': tune.grid_search([
-            None,
+            #None,
             tf.nn.relu,
-            tf.nn.leaky_relu,
+            #tf.nn.leaky_relu,
             tf.nn.selu,
             tf.nn.tanh,
         ]),
