@@ -38,6 +38,7 @@ import os
 from collections import Counter
 import matplotlib
 import matplotlib.pyplot as plt
+import json
 #import random
 
 
@@ -106,6 +107,8 @@ MODEL_OPTIONS = {'tf_model':TF_MODEL, 'use_lemma':False}
 
 def fuse_with_scicite_model(df, dataset_file, model_name):
 	filename = dataset_file+'.'+model_name+'.json'
+	if not os.path.isfile(filename):
+		return df
 	print(f'Reading {filename}..')
 	extra_df = pd.read_json(filename)
 	extra_df = extra_df[['probabilities','string']]
@@ -116,7 +119,7 @@ def fuse_with_scicite_model(df, dataset_file, model_name):
 	})
 	df = df.set_index('anchorsent').join(extra_df.set_index('anchorsent'), on='anchorsent')
 	df = df.reset_index().rename(columns={'index': 'anchorsent'})
-	class_size = max(map(lambda x: len(x), filter(lambda x: type(x) in [list,tuple,np.array], df[feature_name].to_list())))
+	class_size = max(map(lambda x: len(x), filter(lambda x: type(x) in [list,tuple,np.array,np.ndarray], df[feature_name].to_list())))
 	print(f'{model_name} has class size {class_size}')
 	df[feature_name] = df[feature_name].map(lambda x: np.zeros(class_size)+1/class_size if not(type(x) in [list,tuple,np.array] and len(x)== class_size) else x)
 	for e in df[feature_name].to_list():
@@ -208,7 +211,7 @@ def encode_dataset(dataset):
 			embedded_sentences = MODEL_MANAGER.embed(df['anchorsent'])
 			with open(cache_file, 'wb') as f:
 				pickle.dump(dict(zip(df['anchorsent'],embedded_sentences)), f)
-		df['anchorsent'] = embedded_sentences
+		df['anchorsent_embedding'] = embedded_sentences
 		# Embed extra info
 		if USE_PATTERN_EMBEDDING:
 			cache_file = f'{TF_MODEL}.{key}.extra.embedding_cache.pkl'
@@ -315,9 +318,10 @@ def resample_dataset(set, resampling_fn=None):
 
 def get_dataframe_feature_shape(df, feature):
 	first_element = df[feature][0]
+	if type(first_element) not in [np.array,np.ndarray]:
+		return None    
 	#print(type(first_element), first_element)
-	shape = first_element.shape if type(first_element) in [np.ndarray] else ()
-	return tf.feature_column.numeric_column(feature, shape=shape)
+	return tf.feature_column.numeric_column(feature, shape=first_element.shape)
 
 
 # Define function to convert a data-set into a data-list
@@ -395,7 +399,7 @@ def build_model_fn(feature_columns, n_classes, config):
 				logits -= tf.log(-tf.log(u))
 			return tf.argmax(logits, axis=1)
 
-		predictions = { 'class_ids': sample(logits, random=False) }
+		predictions = { 'class_ids': sample(logits, random=False), 'probabilities': tf.nn.softmax(logits) }
 
 		# 1. Prediction mode
 		# Return our prediction
@@ -531,6 +535,7 @@ def train_and_evaluate(config, trainset, testset, num_epochs, batch_size, max_st
 	eval_spec = tf.estimator.EvalSpec(input_fn=test_input_fn, steps=EVALUATION_STEPS, start_delay_secs=0, throttle_secs=0)
 
 	tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
+	return estimator
 
 
 # Define function for plotting summary results
@@ -558,7 +563,70 @@ def plot_summary_results(summary_results):
 # In[ ]:
 
 
-def build_cross_validate_model(datalist):
+def cross_validate_model(config, feature_columns, n_classes):
+	# Perform k-fold cross-validation
+	feature_set = set(f.key for f in feature_columns)
+	cross_validation = KFold(n_splits=config["N_SPLITS"], shuffle=True, random_state=1)
+	for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
+		print(f'-------- Fold {e} --------')
+		print(f'Train-set {e} indexes {train_index}')
+		print(f'Test-set {e} indexes {test_index}')
+		# Split training and test set
+		trainlist = [datalist[u] for u in train_index]
+		trainset = dictify_datalist(trainlist)
+		trainset['x'] = {
+			k:v
+			for k,v in trainset['x'].items()
+			if k in feature_set
+		}
+		# Re-sample training set (after sentences embedding)
+		resample_dataset(trainset, resampling_fn=config["RESAMPLING_FN"])
+		print(f'Train-set {e} distribution', Counter(trainset['y']))
+		testlist = [datalist[u] for u in test_index]
+		testset = dictify_datalist(testlist)
+		print(f'Test-set {e} distribution', Counter(testset['y']))
+
+		#config_str = '_'.join(f'{key}={value if not callable(value) else value.__name__}' for key,value in config.items())
+		model_dir = f'{MODEL_DIR}{e}'#'-{config_str}'
+		estimator = train_and_evaluate(
+			config=config,
+			trainset=trainset, 
+			testset=testset, 
+			num_epochs=TRAIN_EPOCHS, 
+			batch_size=config["BATCH_SIZE"], 
+			max_steps=MAX_STEPS, 
+			model_dir=model_dir, 
+			feature_columns=feature_columns, 
+			n_classes=n_classes
+		)
+        
+		dataset = dictify_datalist(datalist)
+		input_fn = tf.estimator.inputs.numpy_input_fn(
+			x=dataset['x'],
+			y=dataset['y'],
+			shuffle=False,
+		)
+		dataset['x']['probabilities'] = list(map(lambda x: x['probabilities'], estimator.predict(input_fn)))
+		xs,ys = zip(*listify_dataset(dataset))
+		xs = [
+			{
+				k: v.tolist() if type(v) in [np.array,np.ndarray] else v
+				for k,v in x
+				if k in ['anchorsent','probabilities']
+			}
+			for x in xs
+		]
+		with open(os.path.join(model_dir,'prediction.json'),'w') as f:
+			json.dump(xs, f, indent=4)
+		yield model_dir # iterator
+
+
+# Define function for distributed cross-validation
+
+# In[ ]:
+
+
+def ray_cross_validation(datalist,feature_columns,n_classes):
 	def get_best_stat_dict(summary_results_list):
 		best_stat_dict = {}
 		for summary_results in summary_results_list:
@@ -572,38 +640,10 @@ def build_cross_validate_model(datalist):
 		for stat,best_list in best_stat_dict.items():
 			best_stat_dict[stat] = {'mean':np.mean(best_list), 'std':np.std(best_list)}
 		return best_stat_dict
-
-	def cross_validate_model(config, reporter):
-		# Perform k-fold cross-validation
+            
+	def ray_cross_validate_model(config, reporter):
 		summary_results_list = []
-		cross_validation = KFold(n_splits=config["N_SPLITS"], shuffle=True, random_state=1)
-		for e, (train_index, test_index) in enumerate(cross_validation.split(datalist)):
-			print(f'-------- Fold {e} --------')
-			print(f'Train-set {e} indexes {train_index}')
-			print(f'Test-set {e} indexes {test_index}')
-			# Split training and test set
-			trainlist = [datalist[u] for u in train_index]
-			trainset = dictify_datalist(trainlist)
-			# Re-sample training set (after sentences embedding)
-			resample_dataset(trainset, resampling_fn=config["RESAMPLING_FN"])
-			print(f'Train-set {e} distribution', Counter(trainset['y']))
-			testlist = [datalist[u] for u in test_index]
-			testset = dictify_datalist(testlist)
-			print(f'Test-set {e} distribution', Counter(testset['y']))
-
-			#config_str = '_'.join(f'{key}={value if not callable(value) else value.__name__}' for key,value in config.items())
-			model_dir = f'{MODEL_DIR}{e}'#'-{config_str}'
-			train_and_evaluate(
-				config=config,
-				trainset=trainset, 
-				testset=testset, 
-				num_epochs=TRAIN_EPOCHS, 
-				batch_size=config["BATCH_SIZE"], 
-				max_steps=MAX_STEPS, 
-				model_dir=model_dir, 
-				feature_columns=feature_columns, 
-				n_classes=n_classes
-			)
+		for e,model_dir in enumerate(cross_validate_model(config,feature_columns,n_classes)):
 			summary_results = get_summary_results(f'./{model_dir}/eval')
 			summary_results = summary_results[-1]['results']
 			summary_results_list.append(summary_results)
@@ -634,7 +674,7 @@ def build_cross_validate_model(datalist):
 				recall_weighted_std=best_stat_dict["recall_weighted"]["std"],
 			)
 			print(f'Average best statistics at fold {e}: {best_stat_dict}')
-	return cross_validate_model
+	return ray_cross_validate_model
 
 
 # Load dataset 1
@@ -666,7 +706,12 @@ n_classes = encode_dataset({'train':trainset, 'test':testset})
 # In[ ]:
 
 
-feature_columns = [get_dataframe_feature_shape(trainset['x'],feature) for feature in trainset['x'].keys()]
+feature_columns = [
+    get_dataframe_feature_shape(trainset['x'],feature) 
+    for feature in trainset['x'].keys()
+    if get_dataframe_feature_shape(trainset['x'],feature) is not None
+    #and feature in ['aclarc_prediction','scicite_prediction']
+]
 print(feature_columns)
 
 
@@ -701,7 +746,7 @@ ray.init(num_cpus=multiprocessing.cpu_count())
 experiment_name = 'hp_tuning'
 local_dir = os.path.join('.','ray_results')
 analysis = tune.run( # https://ray.readthedocs.io/en/latest/tune-package-ref.html#ray.tune.run
-    build_cross_validate_model(datalist),
+    ray_cross_validation(datalist,feature_columns,n_classes),
     num_samples=1, # Number of times to sample from the hyperparameter space. Defaults to 1. If grid_search is provided as an argument, the grid will be repeated num_samples of times.
     name=experiment_name,
     local_dir=local_dir,
