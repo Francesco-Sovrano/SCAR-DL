@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+# Function to change auto indent to tab instead of 4 spaces
+
+# In[ ]:
+
+
+get_ipython().run_cell_magic('javascript', '', '\nIPython.tab_as_tab_everywhere = function(use_tabs) {\n    if (use_tabs === undefined) {\n        use_tabs = true; \n    }\n\n    // apply setting to all current CodeMirror instances\n    IPython.notebook.get_cells().map(\n        function(c) {  return c.code_mirror.options.indentWithTabs=use_tabs;  }\n    );\n    // make sure new CodeMirror instances created in the future also use this setting\n    CodeMirror.defaults.indentWithTabs=use_tabs;\n\n    };\n\nIPython.tab_as_tab_everywhere()')
+
+
 # Install dependencies
 
 # !pip3 install -r requirements.txt -U
@@ -13,6 +21,8 @@
 
 import warnings
 warnings.filterwarnings('ignore')
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
 
 
 # Import core lib
@@ -54,7 +64,6 @@ import multiprocessing
 # In[ ]:
 
 
-import tensorflow as tf
 import tf_metrics
 from tensorflow.core.util import event_pb2
 from tensorflow.python.lib.io import tf_record
@@ -62,14 +71,6 @@ from sklearn.model_selection import KFold
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 import sklearn.preprocessing as preprocessing
 from imblearn import over_sampling, under_sampling, combine
-
-
-# Suppress tensorflow warnings
-
-# In[ ]:
-
-
-tf.get_logger().setLevel('ERROR')
 
 
 # Define constants
@@ -96,6 +97,7 @@ MAX_STEPS = 10**4
 EVALUATION_PER_TRAINING = 30
 EVALUATION_STEPS = MAX_STEPS/EVALUATION_PER_TRAINING
 MODEL_DIR = './model'
+DATA_DIR = './dataset'
 TF_MODEL = 'USE_MLQA'
 MODEL_OPTIONS = {'tf_model':TF_MODEL, 'use_lemma':False}
 
@@ -201,7 +203,7 @@ def encode_dataset(dataset):
 			df['main_predicate'] = df['anchorsent']
 		# Embed anchor sentences
 		#df['anchorsent'] = list(df['anchorsent'])
-		cache_file = f'{TF_MODEL}.{key}.anchorsent.embedding_cache.pkl'
+		cache_file = f'cache/{TF_MODEL}.{key}.anchorsent.embedding_cache.pkl'
 		if os.path.isfile(cache_file):
 			with open(cache_file, 'rb') as f:
 				embedded_sentences_dict = pickle.load(f)
@@ -214,7 +216,7 @@ def encode_dataset(dataset):
 		df['anchorsent_embedding'] = embedded_sentences
 		# Embed extra info
 		if USE_PATTERN_EMBEDDING:
-			cache_file = f'{TF_MODEL}.{key}.extra.embedding_cache.pkl'
+			cache_file = f'cache/{TF_MODEL}.{key}.extra.embedding_cache.pkl'
 			if os.path.isfile(cache_file):
 				with open(cache_file, 'rb') as f:
 					embedded_extra_dict = pickle.load(f)
@@ -452,26 +454,83 @@ def build_model_fn(feature_columns, n_classes, config):
 	return model_fn
 
 
+# Define function for training and evaluating
+
+# In[ ]:
+
+
+def train_and_evaluate(config, trainset, testset, num_epochs, batch_size, max_steps, model_dir, feature_columns, n_classes):
+    # Create a custom estimator using model_fn to define the model
+    tf.logging.info("Before classifier construction")
+    run_config = tf.estimator.RunConfig(
+        model_dir=model_dir,
+        #save_checkpoints_secs=EVALUATION_SECONDS, 
+        save_checkpoints_steps=EVALUATION_STEPS,
+        keep_checkpoint_max=1,
+    )
+    estimator = tf.estimator.Estimator(
+        model_fn=build_model_fn(feature_columns, n_classes, config),
+        config=run_config,
+    )
+    tf.logging.info("...done constructing classifier")
+
+    # Build train input callback
+    train_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x=trainset['x'],
+        y=trainset['y'],
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        shuffle=True
+    )
+    # Build train specifics
+    train_spec = tf.estimator.TrainSpec(
+        input_fn=train_input_fn, 
+        max_steps=max_steps
+    )
+    # Build test input callback
+    test_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x=testset['x'],
+        y=testset['y'],
+        num_epochs=1,
+        batch_size=batch_size,
+        shuffle=False
+    )
+    # Build best_exporter
+    feature_spec = tf.feature_column.make_parse_example_spec(feature_columns)
+    exporter = tf.estimator.BestExporter(
+        name="best_exporter",
+        serving_input_receiver_fn=tf.estimator.export.build_parsing_serving_input_receiver_fn(feature_spec),
+        exports_to_keep=1 # this will keep the N best checkpoints
+    )
+    # Build eval specifics
+    eval_spec = tf.estimator.EvalSpec(
+        input_fn=test_input_fn, 
+        steps=EVALUATION_STEPS, 
+        start_delay_secs=0, 
+        throttle_secs=0,
+        exporters=[exporter],
+    )
+
+    tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
+    return estimator
+
+
 # Define function for extracting summaries (statistics) from tensorboard events
 
 # In[ ]:
 
 
-def get_document_list(directory):
-	doc_list = []
-	for obj in os.listdir(directory):
-		obj_path = os.path.join(directory, obj)
-		if os.path.isfile(obj_path):
-			doc_list.append(obj_path)
-		elif os.path.isdir(obj_path):
-			doc_list.extend(get_document_list(obj_path))
-	return doc_list
-
-
-# In[ ]:
-
-
 def get_summary_results(summary_dir):
+	def get_document_list(directory):
+		doc_list = []
+		for obj in os.listdir(directory):
+			obj_path = os.path.join(directory, obj)
+			if os.path.isfile(obj_path):
+				doc_list.append(obj_path)
+			elif os.path.isdir(obj_path):
+				doc_list.extend(get_document_list(obj_path))
+		return doc_list
+    
 	def my_summary_iterator(path):
 		for r in tf_record.tf_record_iterator(path):
 			yield event_pb2.Event.FromString(r)
@@ -480,7 +539,7 @@ def get_summary_results(summary_dir):
 	document_list = get_document_list(summary_dir)
 	#print(document_list)
 	for filename in document_list:
-		print(filename)
+		#print(filename)
 		if not os.path.basename(filename).startswith('events.'):
 			continue
 		value_dict = {}
@@ -494,76 +553,41 @@ def get_summary_results(summary_dir):
 	return result_list
 
 
-# Define function for training and evaluating
-
-# In[ ]:
-
-
-def train_and_evaluate(config, trainset, testset, num_epochs, batch_size, max_steps, model_dir, feature_columns, n_classes):
-	# Create a custom estimator using model_fn to define the model
-	tf.logging.info("Before classifier construction")
-	run_config = tf.estimator.RunConfig(
-		model_dir=model_dir,
-		#save_checkpoints_secs=EVALUATION_SECONDS, 
-		save_checkpoints_steps=EVALUATION_STEPS,
-		#keep_checkpoint_max=3,
-	)
-	estimator = tf.estimator.Estimator(
-		model_fn=build_model_fn(feature_columns, n_classes, config),
-		config=run_config,
-	)
-	tf.logging.info("...done constructing classifier")
-
-	# Build train input callback
-	train_input_fn = tf.estimator.inputs.numpy_input_fn(
-		x=trainset['x'],
-		y=trainset['y'],
-		num_epochs=num_epochs,
-		batch_size=batch_size,
-		shuffle=True
-	)
-	# Build test input callback
-	test_input_fn = tf.estimator.inputs.numpy_input_fn(
-		x=testset['x'],
-		y=testset['y'],
-		num_epochs=1,
-		batch_size=batch_size,
-		shuffle=False
-	)
-
-	train_spec = tf.estimator.TrainSpec(input_fn=train_input_fn, max_steps=max_steps)
-	eval_spec = tf.estimator.EvalSpec(input_fn=test_input_fn, steps=EVALUATION_STEPS, start_delay_secs=0, throttle_secs=0)
-
-	tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
-	return estimator
-
-
-# Define function for plotting summary results
-
-# In[ ]:
-
-
-def plot_summary_results(summary_results):
-	plt.clf()
-	plt_height = len(summary_results)
-	_, axes = plt.subplots(nrows=plt_height, sharex=True, figsize=(14,15*plt_height))
-	for e, (stat, value_list) in enumerate(summary_results.items()):
-		ax = axes[e]
-		#ax.set_ylim([0, 1])
-		#ax.set_yticks(value_list)
-		step_list,value_list=zip(*value_list)
-		ax.plot(step_list, value_list)
-		ax.set(xlabel='step', ylabel=stat)
-		ax.grid()
-	plt.show()
-
-
 # Define function for cross-validating the model
 
 # In[ ]:
 
 
 def cross_validate_model(config, feature_columns, n_classes):
+	def get_best_estimator(model_dir):
+		exporter_dir = os.path.join(model_dir,'export','best_exporter')
+		best_model_name = os.listdir(exporter_dir)[0]
+		best_model_path = os.path.join(exporter_dir, best_model_name)
+		if not os.path.exists(best_model_path):
+			return None
+		return tf.estimator.Estimator(
+			model_fn=build_model_fn(feature_columns, n_classes, config),
+			warm_start_from=best_model_path,
+		)
+
+	def save_prediction_results(path, datalist, estimator):
+		if estimator is None:
+			return
+		dataset = dictify_datalist(datalist)
+		input_fn = tf.estimator.inputs.numpy_input_fn(x=dataset['x'], y=dataset['y'], shuffle=False)
+		dataset['x']['probabilities'] = list(map(lambda x: x['probabilities'], estimator.predict(input_fn)))
+		xs,ys = zip(*listify_dataset(dataset))
+		xs = [
+			{
+				k: v.tolist() if type(v) in [np.array,np.ndarray] else v
+				for k,v in x
+				if k in ['anchorsent','probabilities']
+			}
+			for x in xs
+		]
+		with open(path,'w') as f:
+			json.dump(xs, f, indent=4)
+
 	# Perform k-fold cross-validation
 	feature_set = set(f.key for f in feature_columns)
 	cross_validation = KFold(n_splits=config["N_SPLITS"], shuffle=True, random_state=1)
@@ -599,26 +623,12 @@ def cross_validate_model(config, feature_columns, n_classes):
 			feature_columns=feature_columns, 
 			n_classes=n_classes
 		)
+
+		best_estimator = get_best_estimator(model_dir)
+		save_prediction_results(os.path.join(model_dir,'trainset_predictions.json'), trainlist, best_estimator)
+		save_prediction_results(os.path.join(model_dir,'testset_predictions.json'), testlist, best_estimator)
         
-		dataset = dictify_datalist(datalist)
-		input_fn = tf.estimator.inputs.numpy_input_fn(
-			x=dataset['x'],
-			y=dataset['y'],
-			shuffle=False,
-		)
-		dataset['x']['probabilities'] = list(map(lambda x: x['probabilities'], estimator.predict(input_fn)))
-		xs,ys = zip(*listify_dataset(dataset))
-		xs = [
-			{
-				k: v.tolist() if type(v) in [np.array,np.ndarray] else v
-				for k,v in x
-				if k in ['anchorsent','probabilities']
-			}
-			for x in xs
-		]
-		with open(os.path.join(model_dir,'prediction.json'),'w') as f:
-			json.dump(xs, f, indent=4)
-		yield model_dir # iterator
+		yield get_summary_results(os.path.join('.',model_dir,'eval'))[-1]['results'] # iterator
 
 
 # Define function for distributed cross-validation
@@ -642,10 +652,10 @@ def ray_cross_validation(datalist,feature_columns,n_classes):
 		return best_stat_dict
             
 	def ray_cross_validate_model(config, reporter):
+		warnings.filterwarnings('ignore')
+		tf.get_logger().setLevel('ERROR')
 		summary_results_list = []
-		for e,model_dir in enumerate(cross_validate_model(config,feature_columns,n_classes)):
-			summary_results = get_summary_results(f'./{model_dir}/eval')
-			summary_results = summary_results[-1]['results']
+		for e,summary_results in enumerate(cross_validate_model(config,feature_columns,n_classes)):
 			summary_results_list.append(summary_results)
 			print(f'Test-set {e} results:', summary_results)
 			best_stat_dict = get_best_stat_dict(summary_results_list)
@@ -682,7 +692,7 @@ def ray_cross_validation(datalist,feature_columns,n_classes):
 # In[ ]:
 
 
-trainset = get_dataframe('training_all')
+trainset = get_dataframe(os.path.join(DATA_DIR,'training_all'))
 
 
 # Load dataset 2
@@ -690,7 +700,7 @@ trainset = get_dataframe('training_all')
 # In[ ]:
 
 
-testset = get_dataframe('test_groundtruth_all')
+testset = get_dataframe(os.path.join(DATA_DIR,'test_groundtruth_all'))
 
 
 # Encode dataset
@@ -753,6 +763,7 @@ analysis = tune.run( # https://ray.readthedocs.io/en/latest/tune-package-ref.htm
     resume=os.path.isdir(os.path.join(local_dir,experiment_name)),
     #global_checkpoint_period=15*60,
     #keep_checkpoints_num=3,
+    verbose=1, # 0, 1, or 2. Verbosity mode. 0 = silent, 1 = only status updates, 2 = status and trial results.
     config={ 
         "N_SPLITS": tune.grid_search([
             #3,
