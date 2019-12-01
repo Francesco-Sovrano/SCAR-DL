@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# Function to change auto indent to tab instead of 4 spaces
-
-# In[ ]:
-
-
-get_ipython().run_cell_magic('javascript', '', '\nIPython.tab_as_tab_everywhere = function(use_tabs) {\n    if (use_tabs === undefined) {\n        use_tabs = true; \n    }\n\n    // apply setting to all current CodeMirror instances\n    IPython.notebook.get_cells().map(\n        function(c) {  return c.code_mirror.options.indentWithTabs=use_tabs;  }\n    );\n    // make sure new CodeMirror instances created in the future also use this setting\n    CodeMirror.defaults.indentWithTabs=use_tabs;\n\n    };\n\nIPython.tab_as_tab_everywhere()')
-
 
 # Install dependencies
 
@@ -119,8 +112,7 @@ def fuse_with_scicite_model(df, dataset_file, model_name):
 		'probabilities': feature_name, 
 		'string': 'anchorsent',
 	})
-	df = df.set_index('anchorsent').join(extra_df.set_index('anchorsent'), on='anchorsent')
-	df = df.reset_index().rename(columns={'index': 'anchorsent'})
+	df = pd.merge(extra_df, df, on='anchorsent', how='inner', sort=True).drop_duplicates(subset=['anchorsent'])
 	class_size = max(map(lambda x: len(x), filter(lambda x: type(x) in [list,tuple,np.array,np.ndarray], df[feature_name].to_list())))
 	print(f'{model_name} has class size {class_size}')
 	df[feature_name] = df[feature_name].map(lambda x: np.zeros(class_size)+1/class_size if not(type(x) in [list,tuple,np.array] and len(x)== class_size) else x)
@@ -174,6 +166,7 @@ def get_dataframe(dataset_file):
 	print(df)
 	
 	# Return dataset
+	df.drop_duplicates(subset=['anchorsent'], inplace=True)
 	y_list = df.pop('citfunc').values.tolist() # Extract target list
 	feature_list = df.columns.values.tolist()
 	x_dict = {feature: df[feature].to_list() for feature in feature_list}
