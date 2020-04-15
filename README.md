@@ -2,7 +2,7 @@
 
 ## Installation
 
-* requires python 3.7+ *
+*Requirement: python 3.7+*
 * clone this repo
 * cd to the repo
 * start jupyter notebook: `jupyter notebook`
