@@ -47,9 +47,10 @@ class ModelManager():
 	
 	@staticmethod
 	def load_nlp_model():
-		print('Loading spacy model <{}>...'.format(SPACY_MODEL))
+		print('Loading Spacy model <{}>...'.format(SPACY_MODEL))
 		# go here <https://spacy.io/usage/processing-pipelines> for more information about Language Processing Pipeline (tokenizer, tagger, parser, etc..)
 		nlp = spacy.load(SPACY_MODEL)
+		print('Spacy model loaded')
 		return nlp
 	
 	@staticmethod
