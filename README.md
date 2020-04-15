@@ -5,10 +5,8 @@
 * requires python 3.7+
 * clone this repo
 * cd to the repo
-* create a virtual environment: `python3 -m venv venv`
-* load the virtual environment: `source venv/bin/activate`
-* install the dependencies: `pip install -r requirements.txt`
-* install the spaCy model: `python -m spacy download en_core_web_md`
+* start jupyter notebook: `jupyter notebook`
+* open scar.ipynb: `http://localhost:8888/notebooks/scar.ipynb`
 
 **Tested on macOS Mojave and Catalina**
 
