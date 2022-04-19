@@ -8,6 +8,8 @@
 * start jupyter notebook: `jupyter notebook`
 * open scar.ipynb: `http://localhost:8888/notebooks/scar.ipynb`
 
+For more technical details read [this](technical_doc.pdf).
+
 **Tested on macOS Mojave and Catalina**
 
 Contact
